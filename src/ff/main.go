@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"log"
 	"net/http"
 	"strconv"
@@ -12,6 +13,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+var (
+	knownLeagues = []int{LOEG_LEAGUE_ID} // , ALUM_LEAGUE_ID}
+)
+
 const (
 	BASE_ESPNFF_URL = "http://games.espn.com/ffl/api/v2"
 	LOEG_LEAGUE_ID  = 365177
@@ -19,8 +24,13 @@ const (
 	SEASON = 2018
 )
 
-func (l *league) New(id int) (*league, error) {
+type league struct {
+	Id         int
+	Teams      []*team
+	IdOwnerMap map[int]string
+}
 
+func getStandings(id int) (*standings, error) {
 	// Build a query string from disparate components
 	sb := strings.Builder{}
 	sb.WriteString(BASE_ESPNFF_URL)
@@ -51,37 +61,47 @@ func (l *league) New(id int) (*league, error) {
 		return nil, err
 	}
 
-	// If the league is known, populate the team
+	return &s,nil
+}
+
+func (l *league) New(id int) (*league, error) {
+
+	s, err := getStandings(id)
+	if err != nil {
+		return nil, err
+	}
+
+	sb := strings.Builder{}
+	// If the league is known, populate the teams
 	teams := []*team{}
+	idOwnerName := make(map[int]string)
 	for _, leagueId := range knownLeagues {
 		if leagueId == id {
 			for _, t := range s.Teams {
-				for _, o := range t.Owners {
+				for _, owners := range t.Owners {
 					sb.Reset()
-					sb.WriteString(o.FirstName)
+					sb.WriteString(owners.FirstName)
 					sb.WriteString(" ")
-					sb.WriteString(o.LastName[:1])
+					sb.WriteString(owners.LastName[:1])
+					ownerName := sb.String()
 					teams = append(teams, &team{
-						Owner:         &owner{sb.String()},
+						Owner:         &owner{Name: ownerName},
 						Abbreviation:  t.TeamAbbrev,
 						Id:            t.TeamId,
 						Wins:          t.Record.OverallWins,
 						PointsFor:     t.Record.PointsFor,
 						PointsAgainst: t.Record.PointsAgainst,
 					})
+					idOwnerName[t.TeamId] = ownerName
 				}
 			}
 		}
 	}
 	return &league{
-		Id:    id,
-		Teams: teams,
+		Id:         id,
+		Teams:      teams,
+		IdOwnerMap: idOwnerName,
 	}, nil
-}
-
-type league struct {
-	Id    int
-	Teams []*team
 }
 
 type team struct {
@@ -114,53 +134,34 @@ type standings struct {
 	} `json:"teams"`
 }
 
-var (
-	wins = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "wins",
-			Help: "Number of wins on the season.",
-		},
-		[]string{"owner"})
-
-	pointsFor = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "pointsFor",
-			Help: "Points scored this season",
-		},
-		[]string{"owner"})
-
-	pointsAgainst = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "pointsAgainst",
-			Help: "Points against this season",
-		},
-		[]string{"owner"})
-
-	knownLeagues = []int{LOEG_LEAGUE_ID} // , ALUM_LEAGUE_ID}
-)
-
 func init() {
 	prometheus.MustRegister(wins)
-	prometheus.MustRegister(pointsFor)
-	prometheus.MustRegister(pointsAgainst)
+	prometheus.MustRegister(pointsForTotal)
+	prometheus.MustRegister(pointsAgainstTotal)
+	prometheus.MustRegister(pointsByWeek)
 }
 
 func main() {
 
-	var loeg league
-	loegLeague, err := loeg.New(LOEG_LEAGUE_ID)
+	var l league
+	loeg, err := l.New(LOEG_LEAGUE_ID)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	for _, t := range loegLeague.Teams {
-		name := t.Owner.Name
-		wins.With(prometheus.Labels{"owner": name}).Set(t.Wins)
-		pointsFor.With(prometheus.Labels{"owner": name}).Set(t.PointsFor)
-		pointsAgainst.With(prometheus.Labels{"owner": name}).Set(t.PointsAgainst)
+	weekly := flag.Bool("weekly",false,"Scrape these metrics once a week.")
+	gametime := flag.Bool("gametime", false, "Scrape these metrics twice a minute during games.")
+
+	flag.Parse()
+
+	if *weekly {
+		loeg.CollectWeekly()
+	}
+	if *gametime {
+		loeg.CollectLiveGames()
 	}
 
-	log.Println("Starting FF metrics server at /ff-metrics...")
-	http.Handle("/ff-metrics", promhttp.Handler())
-	log.Fatal(http.ListenAndServe(":9090", nil))
+	log.Println("Starting FF metrics server at /metrics...")
+	http.Handle("/metrics", promhttp.Handler())
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

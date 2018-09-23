@@ -1,3 +1,8 @@
 # Fantasy Football Metrics Aggregator
 
 Hits the ESPN Fantasy Football API to produce metrics with Prometheus.
+
+## Flags
+
+* `-weekly` collects wins, points-for and points-against
+* `-gametime` collects the score by week
